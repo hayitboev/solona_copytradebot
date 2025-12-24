@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex}; // Use std Mutex for synchronous access to Option
 use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, broadcast};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{info, warn, error, debug};
@@ -134,21 +134,38 @@ impl WebSocketManager {
     }
 
     /// Run the connection loop forever.
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
         loop {
             let target = {
                 let lock = self.current_subscription.lock().unwrap();
                 lock.clone()
             };
 
-            if let Err(e) = self.handle_connection(target).await {
-                error!("WebSocket connection failed: {}. Retrying in {}s...", e, RECONNECT_DELAY.as_secs());
-            } else {
-                warn!("WebSocket connection dropped. Retrying in {}s...", RECONNECT_DELAY.as_secs());
+            // Race connection handling with shutdown signal
+            tokio::select! {
+                result = self.handle_connection(target) => {
+                    if let Err(e) = result {
+                        error!("WebSocket connection failed: {}. Retrying in {}s...", e, RECONNECT_DELAY.as_secs());
+                    } else {
+                        warn!("WebSocket connection dropped. Retrying in {}s...", RECONNECT_DELAY.as_secs());
+                    }
+                }
+                _ = shutdown.recv() => {
+                    info!("WebSocket Manager shutting down...");
+                    break;
+                }
             }
 
-            sleep(RECONNECT_DELAY).await;
+            // Race retry sleep with shutdown
+            tokio::select! {
+                _ = sleep(RECONNECT_DELAY) => {}
+                _ = shutdown.recv() => {
+                    info!("WebSocket Manager shutting down...");
+                    break;
+                }
+            }
         }
+        Ok(())
     }
 }
 
