@@ -20,6 +20,9 @@ pub enum AppError {
     #[error("gRPC error: {0}")]
     Grpc(#[from] tonic::Status),
 
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
     #[error("RPC error: {0}")]
     Rpc(String),
 

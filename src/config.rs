@@ -32,6 +32,12 @@ pub struct Config {
     // Trading
     pub jupiter_api_url: String,
     pub max_workers: usize,
+
+    // Risk Management
+    pub min_trade_amount_sol: f64,
+    pub max_trade_amount_sol: f64,
+    pub slippage_bps: u16,
+    pub cooldown_seconds: u64,
 }
 
 impl Config {
@@ -45,6 +51,10 @@ impl Config {
             .set_default("transport_mode", "auto")?
             .set_default("max_workers", 4)?
             .set_default("jupiter_api_url", "https://quote-api.jup.ag/v6")?
+            .set_default("min_trade_amount_sol", 0.01)?
+            .set_default("max_trade_amount_sol", 1.0)?
+            .set_default("slippage_bps", 50)? // 0.5%
+            .set_default("cooldown_seconds", 60)?
             
             // Load from environment variables (prefixed with SOL_ if needed, or direct)
             .add_source(Environment::default().separator("__"));
