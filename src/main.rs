@@ -1,23 +1,15 @@
-mod config;
-mod error;
-mod http;
-mod transport;
-mod processor;
-mod trading;
-mod analytics;
-mod utils;
-
 use std::sync::Arc;
 use tracing::{info, error, Level};
-use crate::error::Result;
-use crate::transport::websocket::manager::WebSocketManager;
-use crate::transport::Transport;
-use crate::config::Config; // Assuming Config struct exists
-use crate::processor::worker::Worker;
-use crate::http::race_client::RaceClient;
-use crate::trading::engine::TradingEngine;
-use crate::analytics::stats::Stats;
 use std::time::Duration;
+
+use solana_wallet_monitor::error::Result;
+use solana_wallet_monitor::transport::websocket::manager::WebSocketManager;
+use solana_wallet_monitor::transport::Transport;
+use solana_wallet_monitor::config::Config;
+use solana_wallet_monitor::processor::worker::Worker;
+use solana_wallet_monitor::http::race_client::RaceClient;
+use solana_wallet_monitor::trading::engine::TradingEngine;
+use solana_wallet_monitor::analytics::stats::Stats;
 
 #[tokio::main]
 async fn main() -> Result<()> {
