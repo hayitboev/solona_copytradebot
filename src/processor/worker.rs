@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedReceiver, Sender};
+use tokio::sync::{mpsc::{UnboundedReceiver, Sender}, broadcast};
 use tracing::{info, debug, error, warn};
 
 use crate::http::race_client::RaceClient;
@@ -7,6 +7,8 @@ use crate::processor::transaction::parse_transaction;
 use crate::processor::swap_detector::{detect_swap, SwapEvent};
 use crate::processor::cache::DedupCache;
 use crate::error::Result;
+use crate::analytics::stats::Stats;
+use crate::utils::time::{now_instant, elapsed_ms};
 
 pub struct Worker {
     race_client: RaceClient,
@@ -14,6 +16,7 @@ pub struct Worker {
     rx_signatures: UnboundedReceiver<String>,
     tx_swaps: Sender<SwapEvent>,
     target_wallet: String,
+    stats: Arc<Stats>,
 }
 
 impl Worker {
@@ -22,6 +25,7 @@ impl Worker {
         rx_signatures: UnboundedReceiver<String>,
         tx_swaps: Sender<SwapEvent>,
         target_wallet: String,
+        stats: Arc<Stats>,
     ) -> Self {
         Self {
             race_client,
@@ -29,10 +33,11 @@ impl Worker {
             rx_signatures,
             tx_swaps,
             target_wallet,
+            stats,
         }
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(mut self, mut shutdown: broadcast::Receiver<()>) {
         info!("Worker started. Waiting for signatures...");
 
         // Background cleanup task for cache
@@ -45,20 +50,36 @@ impl Worker {
             }
         });
 
-        while let Some(signature) = self.rx_signatures.recv().await {
-            let client = self.race_client.clone();
-            let tx_swaps = self.tx_swaps.clone();
-            let cache = self.cache.clone();
-            let target_wallet = self.target_wallet.clone();
+        loop {
+            tokio::select! {
+                signature_opt = self.rx_signatures.recv() => {
+                    match signature_opt {
+                        Some(signature) => {
+                            let client = self.race_client.clone();
+                            let tx_swaps = self.tx_swaps.clone();
+                            let cache = self.cache.clone();
+                            let target_wallet = self.target_wallet.clone();
+                            let stats = self.stats.clone();
 
-            // Spawn a task for each signature to handle concurrency
-            tokio::spawn(async move {
-                if let Err(e) = process_signature(client, cache, signature, tx_swaps, target_wallet).await {
-                    // Only log errors that are not "already processed" if we treated that as error
-                    // But we handle cache check inside.
-                    warn!("Error processing signature: {}", e);
+                            // Spawn a task for each signature to handle concurrency
+                            tokio::spawn(async move {
+                                let _start_time = now_instant();
+                                if let Err(e) = process_signature(client, cache, signature, tx_swaps, target_wallet, stats.clone()).await {
+                                    warn!("Error processing signature: {}", e);
+                                }
+                            });
+                        }
+                        None => {
+                            info!("Signature channel closed.");
+                            break;
+                        }
+                    }
                 }
-            });
+                _ = shutdown.recv() => {
+                    info!("Worker shutting down...");
+                    break;
+                }
+            }
         }
 
         info!("Worker stopped.");
@@ -71,6 +92,7 @@ async fn process_signature(
     signature: String,
     tx_swaps: Sender<SwapEvent>,
     target_wallet: String,
+    stats: Arc<Stats>,
 ) -> Result<()> {
     // 1. Deduplication
     if !cache.check_and_insert(&signature) {
@@ -78,6 +100,7 @@ async fn process_signature(
         return Ok(());
     }
 
+    let start_time = now_instant();
     debug!("Processing signature: {}", signature);
 
     // 2. Fetch Transaction
@@ -89,6 +112,7 @@ async fn process_signature(
 
     // 4. Detect Swap
     if let Some(swap) = detect_swap(&parsed_tx, &target_wallet)? {
+        stats.inc_swaps_detected();
         info!("Swap detected: {} {} {} for {} SOL (Price: {})",
              if matches!(swap.direction, crate::processor::swap_detector::SwapDirection::Buy) { "Bought" } else { "Sold" },
              swap.amount_out, // Amount of token/SOL depending on direction
@@ -105,6 +129,8 @@ async fn process_signature(
     } else {
         debug!("No swap detected for {}", signature);
     }
+
+    stats.update_processing_latency(elapsed_ms(start_time));
 
     Ok(())
 }

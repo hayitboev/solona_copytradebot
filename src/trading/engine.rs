@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::{mpsc::Receiver, broadcast};
 use tracing::{info, warn, error, debug};
 use crate::error::Result;
 use crate::processor::swap_detector::{SwapEvent, SwapDirection};
@@ -8,6 +8,8 @@ use crate::trading::signer::TransactionSigner;
 use crate::trading::jupiter::JupiterClient;
 use crate::http::race_client::RaceClient;
 use crate::config::Config;
+use crate::analytics::stats::Stats;
+use crate::utils::time::{now_instant, elapsed_ms};
 
 // Constants
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -20,6 +22,7 @@ pub struct TradingEngine {
     jupiter_client: Arc<JupiterClient>,
     race_client: RaceClient,
     rx_swaps: Receiver<SwapEvent>,
+    stats: Arc<Stats>,
 }
 
 impl TradingEngine {
@@ -27,6 +30,7 @@ impl TradingEngine {
         config: Config,
         race_client: RaceClient,
         rx_swaps: Receiver<SwapEvent>,
+        stats: Arc<Stats>,
     ) -> Result<Self> {
         let risk_manager = Arc::new(RiskManager::new(
             config.min_trade_amount_sol,
@@ -48,22 +52,40 @@ impl TradingEngine {
             jupiter_client,
             race_client,
             rx_swaps,
+            stats,
         })
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(mut self, mut shutdown: broadcast::Receiver<()>) {
         info!("Trading Engine started.");
 
-        while let Some(event) = self.rx_swaps.recv().await {
-            let engine = self.clone_components(); // Helper to clone Arcs for spawning
-            let event = event.clone();
+        loop {
+            tokio::select! {
+                event_opt = self.rx_swaps.recv() => {
+                    match event_opt {
+                        Some(event) => {
+                            let engine = self.clone_components(); // Helper to clone Arcs for spawning
+                            let event = event.clone();
 
-            // Spawn task to handle trade execution
-            tokio::spawn(async move {
-                if let Err(e) = engine.execute_trade(event).await {
-                    error!("Trade execution failed: {}", e);
+                            // Spawn task to handle trade execution
+                            tokio::spawn(async move {
+                                if let Err(e) = engine.execute_trade(event).await {
+                                    engine.stats.inc_failed_trades();
+                                    error!("Trade execution failed: {}", e);
+                                }
+                            });
+                        },
+                        None => {
+                            info!("Swap event channel closed.");
+                            break;
+                        }
+                    }
                 }
-            });
+                _ = shutdown.recv() => {
+                    info!("Trading Engine shutting down...");
+                    break;
+                }
+            }
         }
 
         info!("Trading Engine stopped.");
@@ -82,6 +104,7 @@ impl TradingEngine {
             // config is simple enough to clone fields if needed, or wrap in Arc.
             // `Config` derives Clone.
             config: self.config.clone(),
+            stats: self.stats.clone(),
         }
     }
 }
@@ -92,10 +115,12 @@ struct EngineContext {
     jupiter_client: Arc<JupiterClient>,
     race_client: RaceClient,
     config: Config,
+    stats: Arc<Stats>,
 }
 
 impl EngineContext {
     async fn execute_trade(&self, event: SwapEvent) -> Result<()> {
+        let start_time = now_instant();
         debug!("Processing swap event: {:?}", event);
 
         // 1. Determine Trade Parameters
@@ -184,6 +209,9 @@ impl EngineContext {
 
         // Record trade in risk manager (cooldown)
         self.risk_manager.record_trade(&output_mint);
+
+        self.stats.inc_successful_trades();
+        self.stats.update_trade_latency(elapsed_ms(start_time));
 
         Ok(())
     }
