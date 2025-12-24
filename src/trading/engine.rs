@@ -10,6 +10,10 @@ use crate::http::race_client::RaceClient;
 use crate::config::Config;
 use crate::analytics::stats::Stats;
 use crate::utils::time::{now_instant, elapsed_ms};
+use crate::utils::token::{get_token_balance, get_decimals};
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 
 // Constants
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -21,6 +25,7 @@ pub struct TradingEngine {
     signer: Arc<TransactionSigner>,
     jupiter_client: Arc<JupiterClient>,
     race_client: RaceClient,
+    rpc_client: Arc<RpcClient>,
     rx_swaps: Receiver<SwapEvent>,
     stats: Arc<Stats>,
 }
@@ -45,12 +50,19 @@ impl TradingEngine {
             config.slippage_bps,
         )?);
 
+        // Reuse one of the RPC endpoints for the RpcClient
+        let rpc_url = config.rpc_endpoints.first()
+            .ok_or_else(|| crate::error::AppError::Config(config::ConfigError::Message("No RPC endpoints".into())))?
+            .clone();
+        let rpc_client = Arc::new(RpcClient::new(rpc_url));
+
         Ok(Self {
             config,
             risk_manager,
             signer,
             jupiter_client,
             race_client,
+            rpc_client,
             rx_swaps,
             stats,
         })
@@ -101,6 +113,7 @@ impl TradingEngine {
             signer: self.signer.clone(),
             jupiter_client: self.jupiter_client.clone(),
             race_client: self.race_client.clone(),
+            rpc_client: self.rpc_client.clone(),
             // config is simple enough to clone fields if needed, or wrap in Arc.
             // `Config` derives Clone.
             config: self.config.clone(),
@@ -114,6 +127,7 @@ struct EngineContext {
     signer: Arc<TransactionSigner>,
     jupiter_client: Arc<JupiterClient>,
     race_client: RaceClient,
+    rpc_client: Arc<RpcClient>,
     config: Config,
     stats: Arc<Stats>,
 }
@@ -147,37 +161,21 @@ impl EngineContext {
                 (SOL_MINT.to_string(), event.mint.clone(), amount)
             },
             SwapDirection::Sell => {
-                // We want to sell `event.mint`. Input is Token. Output is SOL.
-                // Amount? We need to know our Token Balance!
-                // This requires an RPC call to `getTokenAccountsByOwner` or similar.
-                // "If buying, check SOL balance in parallel..."
-                // For selling, we MUST check token balance.
-                // For now, let's skip Sell implementation or assume we sell 100%?
-                // Or maybe we just trade "Buy" side for this task?
-                // The task description doesn't explicitly limit to Buy only, but "Max Position" check implies checking if we hold it.
-                // Let's implement Buy logic robustly first.
-                // If Sell, we log "Sell detected, logic pending balance check".
-                // Or we try to fetch balance.
+                // Determine our Token Balance
+                let wallet_pubkey = Pubkey::from_str(&self.signer.pubkey())
+                    .map_err(|e| crate::error::AppError::Parse(format!("Invalid wallet pubkey: {}", e)))?;
+                let mint_pubkey = Pubkey::from_str(&event.mint)
+                    .map_err(|e| crate::error::AppError::Parse(format!("Invalid mint pubkey: {}", e)))?;
 
-                // Let's support BUY only for the MVP step if Sell is complex without state.
-                // But wait, "Detect SOL -> TOKEN (Buy). Detect TOKEN -> SOL (Sell)." in Phase 2.
-                // Phase 3 goal is "Turn those SwapEvent signals into actual on-chain transactions".
-                // If I am copying, and they sell, I should sell.
-                // I will try to fetch my token balance for that mint.
-                // `RaceClient` can do `getTokenAccountBalance`.
+                let balance = get_token_balance(&self.rpc_client, &wallet_pubkey, &mint_pubkey).await?;
 
-                // For this implementation, I will focus on BUY (SOL -> Token) as it's the entry.
-                // And simpler Sell (Token -> SOL) if I can get balance.
-
-                if event.direction == SwapDirection::Sell {
-                     // Need to find the associated token account for this mint.
-                     // This is an extra RPC roundtrip.
-                     warn!("Sell event detected for {}. Selling logic requires balance check (Not implemented in Phase 3 MVP).", event.mint);
-                     return Ok(());
+                if balance == 0 {
+                    warn!("Target sold {}, but our balance is 0. Skipping.", event.mint);
+                    return Ok(());
                 }
 
-                // Fallback for compiler flow (unreachable due to return above)
-                (event.mint.clone(), SOL_MINT.to_string(), 0)
+                // Sell 100%
+                (event.mint.clone(), SOL_MINT.to_string(), balance)
             }
         };
 
@@ -186,12 +184,25 @@ impl EngineContext {
             return Ok(());
         }
 
-        let amount_sol = amount_in_lamports as f64 / LAMPORTS_PER_SOL as f64;
+        // Calculate approximate SOL value for risk check
+        let amount_sol_risk = if input_mint == SOL_MINT {
+            // Buying with SOL
+            amount_in_lamports as f64 / LAMPORTS_PER_SOL as f64
+        } else {
+            // Selling Token for SOL
+            // We need to normalize token amount and estimated price
+            // Price from event is SOL/Token
+            let mint_pubkey = Pubkey::from_str(&input_mint)
+                .map_err(|e| crate::error::AppError::Parse(format!("Invalid mint pubkey: {}", e)))?;
+            let decimals = get_decimals(&self.rpc_client, &mint_pubkey).await?;
+            let token_amount_norm = amount_in_lamports as f64 / 10f64.powi(decimals as i32);
+            token_amount_norm * event.price
+        };
 
         // 2. Risk Check
-        self.risk_manager.check_trade(&output_mint, amount_sol)?;
+        self.risk_manager.check_trade(&output_mint, amount_sol_risk)?;
 
-        info!("Executing BUY for {} (Amount: {} SOL)", output_mint, amount_sol);
+        info!("Executing BUY for {} (Approx Value: {} SOL)", output_mint, amount_sol_risk);
 
         // 3. Fetch Quote
         let quote = self.jupiter_client.get_quote(&input_mint, &output_mint, amount_in_lamports).await?;
@@ -208,7 +219,9 @@ impl EngineContext {
         info!("Trade submitted! Signature: {}", signature);
 
         // Record trade in risk manager (cooldown)
-        self.risk_manager.record_trade(&output_mint);
+        // Always record the Token Mint involved (Buy: output, Sell: input/event.mint)
+        // to prevent immediate re-entry/spam.
+        self.risk_manager.record_trade(&event.mint);
 
         self.stats.inc_successful_trades();
         self.stats.update_trade_latency(elapsed_ms(start_time));

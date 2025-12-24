@@ -52,7 +52,7 @@ pub struct SwapRequest<'a> {
     pub quote_response: QuoteResponse,
     // Optional config
     pub wrap_and_unwrap_sol: bool,
-    // pub use_shared_accounts: bool,
+    pub compute_unit_price_micro_lamports: String, // "auto" or integer as string
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +114,7 @@ impl JupiterClient {
             user_public_key,
             quote_response: quote,
             wrap_and_unwrap_sol: true,
+            compute_unit_price_micro_lamports: "auto".to_string(), // Default to auto priority fees
         };
 
         let start = std::time::Instant::now();
