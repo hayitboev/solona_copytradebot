@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex}; // Use std Mutex for synchronous access to Option
 use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{info, warn, error, debug};
@@ -20,8 +20,13 @@ pub struct WebSocketManager {
     // Channel to send detected signatures to the processor
     signature_tx: mpsc::UnboundedSender<String>,
     // We keep the receiver in an Option inside a Mutex to hand it out once
+    // Using std::sync::Mutex to allow synchronous get_signature_receiver
     signature_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     // Track current subscription to resubscribe on reconnect
+    // Using tokio::sync::Mutex here is fine as it's accessed in async tasks,
+    // but std::sync::Mutex is also fine if contention is low.
+    // Let's stick to tokio Mutex for subscription as it might be held across awaits?
+    // No, string cloning is fast. Let's use std Mutex for simplicity and consistency unless await is needed while holding lock.
     current_subscription: Arc<Mutex<Option<String>>>,
 }
 
@@ -54,7 +59,7 @@ impl WebSocketManager {
                 "method": "logsSubscribe",
                 "params": [
                     { "mentions": [wallet] },
-                    { "commitment": "processed" } // "processed" is fastest for speed
+                    { "commitment": "processed" }
                 ]
             });
             write.send(Message::Text(subscribe_msg.to_string())).await?;
@@ -67,10 +72,9 @@ impl WebSocketManager {
         loop {
             tokio::select! {
                 _ = ping_interval.tick() => {
-                    // Send ping to keep connection alive
                     if let Err(e) = write.send(Message::Ping(vec![])).await {
                         warn!("Failed to send ping: {}", e);
-                        break; // Reconnect
+                        break;
                     }
                 }
                 msg = read.next() => {
@@ -78,11 +82,8 @@ impl WebSocketManager {
                         Some(Ok(message)) => {
                             match message {
                                 Message::Text(text) => self.process_message(&text).await,
-                                Message::Binary(_) => {}, // Ignore binary for JSON-RPC
-                                Message::Ping(_) => {
-                                    // Tungstenite handles pong automatically usually, 
-                                    // but explicitly sending Pong doesn't hurt if needed.
-                                }, 
+                                Message::Binary(_) => {},
+                                Message::Ping(_) => {},
                                 Message::Pong(_) => {},
                                 Message::Close(_) => {
                                     warn!("WebSocket closed by server");
@@ -107,23 +108,17 @@ impl WebSocketManager {
         Ok(())
     }
 
-    // Zero-copy optimization: parsing directly from slice if possible, 
-    // but serde_json typically works on str/bytes.
     async fn process_message(&self, text: &str) {
-        // Fast path: check if it's a notification before full parsing
         if !text.contains("logsNotification") {
             return;
         }
 
-        // Parse minimal needed structure
-        // {"method": "logsNotification", "params": { "result": { "value": { "signature": "..." } } }}
         match serde_json::from_str::<serde_json::Value>(text) {
             Ok(json) => {
                 if let Some(params) = json.get("params") {
                     if let Some(result) = params.get("result") {
                         if let Some(value) = result.get("value") {
                             if let Some(sig) = value.get("signature").and_then(|s| s.as_str()) {
-                                // Send to processor (non-blocking)
                                 if let Err(e) = self.signature_tx.send(sig.to_string()) {
                                     error!("Failed to send signature to channel: {}", e);
                                 } else {
@@ -137,63 +132,45 @@ impl WebSocketManager {
             Err(e) => error!("Failed to parse WS message: {}", e),
         }
     }
-}
 
-#[async_trait::async_trait]
-impl Transport for WebSocketManager {
-    async fn connect(&self) -> Result<()> {
-        // We spawn the connection loop in the background
-        let this_manager = self_clone_helper(self); // Need a way to clone inside async block if needed, 
-                                                    // but Transport trait & self is usually Arc'd in main.
-                                                    // For now, we assume the caller calls connect() and we run the loop.
-                                                    
-        // Ideally, connect() starts the loop.
-        // We need a persistent loop that handles reconnects.
-        panic!("Use run() loop instead for now, or implement spawned actor pattern");
-    }
-
-    // Changing signature slightly to fit the implementation pattern better:
-    // The Trait usually implies "start working". 
-    // Let's implement a specific `run` method for the manager, 
-    // and the trait simply exposes capabilities.
-    
-    async fn subscribe_logs(&self, mention: &str) -> Result<()> {
-        let mut sub = self.current_subscription.lock().await;
-        *sub = Some(mention.to_string());
-        Ok(())
-    }
-
-    fn get_signature_receiver(&self) -> mpsc::UnboundedReceiver<String> {
-        self.signature_rx.lock().await.take().expect("Receiver already taken")
-    }
-
-    async fn reconnect(&self) -> Result<()> {
-        // Handled by the run loop
-        Ok(())
-    }
-}
-
-// Extension to run the loop
-impl WebSocketManager {
-    pub async fn run(&self) {
+    /// Run the connection loop forever.
+    pub async fn run(&self) -> Result<()> {
         loop {
-            let target = self.current_subscription.lock().await.clone();
-            
+            let target = {
+                let lock = self.current_subscription.lock().unwrap();
+                lock.clone()
+            };
+
             if let Err(e) = self.handle_connection(target).await {
                 error!("WebSocket connection failed: {}. Retrying in {}s...", e, RECONNECT_DELAY.as_secs());
             } else {
                 warn!("WebSocket connection dropped. Retrying in {}s...", RECONNECT_DELAY.as_secs());
             }
-            
+
             sleep(RECONNECT_DELAY).await;
         }
     }
 }
 
-// Helper for cloning
-fn self_clone_helper(manager: &WebSocketManager) -> WebSocketManager {
-    // This struct isn't natively cloneable easily due to channels, 
-    // In main logic we wrap WebSocketManager in Arc.
-    // This is a placeholder for logic separation.
-    unimplemented!()
+#[async_trait::async_trait]
+impl Transport for WebSocketManager {
+    async fn connect(&self) -> Result<()> {
+        // Since run() is the main loop, connect() here is ambiguous.
+        // We can just return Ok() and let main call run().
+        Ok(())
+    }
+
+    async fn subscribe_logs(&self, mention: &str) -> Result<()> {
+        let mut sub = self.current_subscription.lock().unwrap();
+        *sub = Some(mention.to_string());
+        Ok(())
+    }
+
+    fn get_signature_receiver(&self) -> mpsc::UnboundedReceiver<String> {
+        self.signature_rx.lock().unwrap().take().expect("Receiver already taken")
+    }
+
+    async fn reconnect(&self) -> Result<()> {
+        Ok(())
+    }
 }

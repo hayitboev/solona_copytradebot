@@ -40,7 +40,7 @@ impl RaceClient {
     /// The closure `f` receives (client, url) and returns a Future.
     async fn race<F, Fut, T>(&self, f: F) -> Result<T> 
     where
-        F: Fn(Client, String) -> Fut + Send + Sync + Copy,
+        F: Fn(Client, String) -> Fut + Send + Sync,
         Fut: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
     {
@@ -50,12 +50,20 @@ impl RaceClient {
         for url in &self.rpc_endpoints {
             let client = self.client.clone();
             let url = url.clone();
+            // We need to reference f, but f is a closure that returns a future.
+            // Since f is Fn (not FnOnce), we can call it multiple times.
+            // But we need to call it inside the loop to get the future.
+
+            // However, `async move` block captures `f`.
+            // If we move `f` into the async block, we can only do it once if `f` is not Copy/Clone.
+            // But we don't need to move `f` into the async block if we call `f` HERE (synchronously) and await the result inside?
+            // `f` returns `Fut`. `Fut` is a Future.
+
+            let fut = f(client, url);
             
             // We pin the future box to satisfy select_ok requirements
             let future = async move {
-                // Simple retry logic inside the individual racer could go here, 
-                // but usually race implies "fire once, first back wins".
-                f(client, url).await
+                fut.await
             }.boxed();
             
             futures.push(future);
