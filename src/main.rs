@@ -80,7 +80,8 @@ async fn main() -> Result<()> {
         rx_sigs,
         tx_swaps,
         config.wallet_address.clone(),
-        stats.clone()
+        stats.clone(),
+        config.max_workers
     );
     let worker_shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
