@@ -157,7 +157,19 @@ impl EngineContext {
                 // Or better, let's use a fixed amount for simplicity of Phase 3 unless specified.
                 // We will use `config.min_trade_amount_sol` as the "buy amount".
 
-                let amount = (self.config.min_trade_amount_sol * LAMPORTS_PER_SOL as f64) as u64;
+                // Refined Strategy: Dynamic sizing based on detected amount, clamped by config.
+                let detected_amount = event.amount_in;
+                let amount = calculate_buy_amount(
+                    detected_amount,
+                    self.config.min_trade_amount_sol,
+                    self.config.max_trade_amount_sol
+                );
+
+                info!("Copying Buy: Detected {:.4} SOL, Trade Amount {:.4} SOL",
+                    detected_amount,
+                    amount as f64 / LAMPORTS_PER_SOL as f64
+                );
+
                 (SOL_MINT.to_string(), event.mint.clone(), amount)
             },
             SwapDirection::Sell => {
@@ -227,5 +239,71 @@ impl EngineContext {
         self.stats.update_trade_latency(elapsed_ms(start_time));
 
         Ok(())
+    }
+}
+
+/// Helper function to calculate the buy amount in lamports
+/// Clamps the detected amount (in SOL) between min and max configured SOL values.
+fn calculate_buy_amount(detected_sol: f64, min_sol: f64, max_sol: f64) -> u64 {
+    // Basic validation to prevent logic errors if config is weird
+    let effective_min = min_sol.min(max_sol);
+    let effective_max = max_sol.max(min_sol);
+
+    let trade_sol = if detected_sol < effective_min {
+        effective_min
+    } else if detected_sol > effective_max {
+        effective_max
+    } else {
+        detected_sol
+    };
+
+    (trade_sol * LAMPORTS_PER_SOL as f64) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_buy_amount_clamping() {
+        let min = 0.1;
+        let max = 1.0;
+
+        // Case 1: Detected amount is within range
+        let detected = 0.5;
+        let result = calculate_buy_amount(detected, min, max);
+        assert_eq!(result, (0.5 * LAMPORTS_PER_SOL as f64) as u64);
+
+        // Case 2: Detected amount is below min
+        let detected = 0.05;
+        let result = calculate_buy_amount(detected, min, max);
+        assert_eq!(result, (min * LAMPORTS_PER_SOL as f64) as u64);
+
+        // Case 3: Detected amount is above max
+        let detected = 5.0;
+        let result = calculate_buy_amount(detected, min, max);
+        assert_eq!(result, (max * LAMPORTS_PER_SOL as f64) as u64);
+
+        // Case 4: Detected amount equals min
+        let detected = 0.1;
+        let result = calculate_buy_amount(detected, min, max);
+        assert_eq!(result, (min * LAMPORTS_PER_SOL as f64) as u64);
+
+        // Case 5: Detected amount equals max
+        let detected = 1.0;
+        let result = calculate_buy_amount(detected, min, max);
+        assert_eq!(result, (max * LAMPORTS_PER_SOL as f64) as u64);
+    }
+
+    #[test]
+    fn test_calculate_buy_amount_inverted_config() {
+        // Edge case: min > max (user config error)
+        // effective_min should be 0.1, effective_max should be 1.0
+        let min = 1.0;
+        let max = 0.1;
+
+        let detected = 0.5;
+        let result = calculate_buy_amount(detected, min, max);
+        assert_eq!(result, (0.5 * LAMPORTS_PER_SOL as f64) as u64);
     }
 }
