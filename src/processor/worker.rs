@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::{mpsc::{UnboundedReceiver, Sender}, broadcast};
+use tokio::sync::{mpsc::{UnboundedReceiver, Sender}, broadcast, Semaphore};
 use tracing::{info, debug, error, warn};
 
 use crate::http::race_client::RaceClient;
@@ -17,6 +17,7 @@ pub struct Worker {
     tx_swaps: Sender<SwapEvent>,
     target_wallet: String,
     stats: Arc<Stats>,
+    semaphore: Arc<Semaphore>,
 }
 
 impl Worker {
@@ -26,6 +27,7 @@ impl Worker {
         tx_swaps: Sender<SwapEvent>,
         target_wallet: String,
         stats: Arc<Stats>,
+        max_workers: usize,
     ) -> Self {
         Self {
             race_client,
@@ -34,6 +36,7 @@ impl Worker {
             tx_swaps,
             target_wallet,
             stats,
+            semaphore: Arc::new(Semaphore::new(max_workers)),
         }
     }
 
@@ -61,8 +64,19 @@ impl Worker {
                             let target_wallet = self.target_wallet.clone();
                             let stats = self.stats.clone();
 
-                            // Spawn a task for each signature to handle concurrency
+                            // Acquire permit
+                            let permit = match self.semaphore.clone().acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    error!("Semaphore closed");
+                                    break;
+                                }
+                            };
+
+                            // Spawn task for signature processing
                             tokio::spawn(async move {
+                                // Permit is held until this task completes and permit is dropped
+                                let _permit = permit;
                                 let _start_time = now_instant();
                                 if let Err(e) = process_signature(client, cache, signature, tx_swaps, target_wallet, stats.clone()).await {
                                     warn!("Error processing signature: {}", e);

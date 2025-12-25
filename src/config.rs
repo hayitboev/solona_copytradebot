@@ -19,25 +19,46 @@ pub struct Config {
     
     // Wallet
     pub wallet_address: String,
-    pub private_key: String, // Kept as string here, parsed when needed
+    pub private_key: String, // Can be Base58 string
 
     // Transport
     pub transport_mode: TransportMode,
-    pub ws_url: String,
+    pub ws_url: String, // Mapped from WEBSOCKET_URL or FAST_WS_ENDPOINT
     pub grpc_endpoint: Option<String>,
 
-    // RPCs (Comma separated list for race client)
+    // RPCs (Used for race client)
     pub rpc_endpoints: Vec<String>,
     
-    // Trading
-    pub jupiter_api_url: String,
-    pub max_workers: usize,
+    // Jupiter
+    pub jupiter_quote_url: String, // JUPITER_QUOTE_URL_PRIMARY
+    pub jupiter_swap_url: String,  // JUPITER_SWAP_URL_PRIMARY
+    pub jupiter_timeout: f64,
+    pub jup_priority_level: String,
+    pub jup_priority_max_lamports: u64,
 
-    // Risk Management
-    pub min_trade_amount_sol: f64,
-    pub max_trade_amount_sol: f64,
+    // Performance
+    pub max_workers: usize,
+    pub fast_mode: bool,
+    pub http_rate_limit_max: u32,
+    pub signature_poll_enabled: bool,
+    pub signature_poll_interval: f64,
+
+    // Trading & Risk
+    pub buy_amount_sol: f64,
+    pub mirror_buy_mode: bool,
+    pub min_trade_amount_sol: f64, // Still used for clamping, mapped to MIRROR_MIN_SOL if mirror mode?
+                                   // Or keep distinct. The .env has MIRROR_MIN_SOL.
+                                   // Let's map .env MIRROR_MIN_SOL to this or add new fields.
+    pub mirror_min_sol: f64,
+    pub mirror_max_sol: f64,
+
+    // Keep legacy for compatibility or mapping
+    pub max_trade_amount_sol: f64, // Mapped to MIRROR_MAX_SOL or independent?
     pub slippage_bps: u16,
     pub cooldown_seconds: u64,
+
+    pub auto_trade_enabled: bool,
+    pub confirm_commitment: String,
 }
 
 impl Config {
@@ -45,55 +66,89 @@ impl Config {
         // Load .env file if it exists
         dotenv::dotenv().ok();
 
-        let builder = ConfigLoader::builder()
-            // Set defaults
-            .set_default("log_level", "info")?
-            .set_default("transport_mode", "auto")?
-            .set_default("max_workers", 4)?
-            .set_default("jupiter_api_url", "https://quote-api.jup.ag/v6")?
-            .set_default("min_trade_amount_sol", 0.01)?
-            .set_default("max_trade_amount_sol", 1.0)?
-            .set_default("slippage_bps", 50)? // 0.5%
-            .set_default("cooldown_seconds", 60)?
-            
-            // Load from environment variables (prefixed with SOL_ if needed, or direct)
-            .add_source(Environment::default().separator("__"));
-
-        // We can look for a config file, but strictly using ENV as per spec
+        // 1. Manually collect RPCs from new ENV pattern
+        let mut collected_rpcs = Vec::new();
+        let rpc_keys = [
+            "RPC_URL", "FAST_RPC_ENDPOINT",
+            "HELIUS_HTTP", "SYNDICA_HTTP", "ALCHEMY_SOL_HTTP", "QN_HTTP",
+            "RPC_URL_FALLBACK1", "RPC_URL_FALLBACK2", "RPC_URL_FALLBACK3"
+        ];
         
-        let config_store = builder.build()?;
-        
-        // Manual extraction to handle complex types like Vec<String> from env string if needed
-        // But 'config' crate handles array in env vars usually via specific syntax (RPC_ENDPOINTS__0)
-        // For simplicity in .env, we often use a single string and split it. 
-        // Let's assume standard deserialization first.
-        
-        // Helper to parse comma-separated RPCs if simple env var is used
-        let rpc_str = env::var("RPC_ENDPOINTS").unwrap_or_default();
-        let rpc_endpoints: Vec<String> = rpc_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        
-        if rpc_endpoints.is_empty() {
-            return Err(AppError::Init("No RPC_ENDPOINTS provided".to_string()));
+        for key in rpc_keys {
+            if let Ok(val) = env::var(key) {
+                if !val.trim().is_empty() {
+                    collected_rpcs.push(val.trim().to_string());
+                }
+            }
         }
-
-        // Re-construct with overrides if necessary, or just deserialize what we can
-        // and manually fill the rest. 
-        // For strictness, let's try direct deserialization with a fallback for the vector.
-
-        let mut s: Config = config_store.try_deserialize().map_err(|e| 
-             AppError::Config(e)
-        )?;
         
-        // Override the empty vec with our manually parsed one if the automatic one failed 
-        // or if we rely on the CSV string approach common in .env
-        if s.rpc_endpoints.is_empty() {
-             s.rpc_endpoints = rpc_endpoints;
-        }
+        // 2. Determine WebSocket URL (Prefer FAST_WS_ENDPOINT, then WEBSOCKET_URL)
+        let ws_url = env::var("FAST_WS_ENDPOINT")
+            .or_else(|_| env::var("WEBSOCKET_URL"))
+            .unwrap_or_else(|_| "wss://api.mainnet-beta.solana.com".to_string());
 
-        Ok(s)
+        // 3. Build Config using `config` crate for standard loading,
+        // but we might need to manually map some env vars to struct fields
+        // if names don't match exactly.
+        
+        // Let's use manual construction for clarity given the specific .env mapping requirement
+        // or helper builder.
+        
+        let wallet_address = env::var("WALLET_ADDRESS").expect("WALLET_ADDRESS must be set");
+        // PRIVATE_KEY_BYTES from env is Base58 string
+        let private_key = env::var("PRIVATE_KEY_BYTES").expect("PRIVATE_KEY_BYTES must be set");
+
+        let jupiter_quote_url = env::var("JUPITER_QUOTE_URL_PRIMARY").unwrap_or_else(|_| "https://api.jup.ag/swap/v1/quote".to_string());
+        let jupiter_swap_url = env::var("JUPITER_SWAP_URL_PRIMARY").unwrap_or_else(|_| "https://api.jup.ag/swap/v1/swap".to_string());
+        let jupiter_timeout = env::var("JUPITER_TIMEOUT").unwrap_or("1.0".to_string()).parse().unwrap_or(1.0);
+        let jup_priority_level = env::var("JUP_PRIORITY_LEVEL").unwrap_or_else(|_| "veryHigh".to_string());
+        let jup_priority_max_lamports = env::var("JUP_PRIORITY_MAX_LAMPORTS").unwrap_or("10000000".to_string()).parse().unwrap_or(10_000_000);
+
+        let max_workers = env::var("MAX_WORKERS").unwrap_or("4".to_string()).parse().unwrap_or(4);
+        let fast_mode = env::var("FAST_MODE").unwrap_or("false".to_string()).parse().unwrap_or(false);
+        let http_rate_limit_max = env::var("HTTP_RATE_LIMIT_MAX").unwrap_or("100".to_string()).parse().unwrap_or(100);
+        let signature_poll_enabled = env::var("SIGNATURE_POLL_ENABLED").unwrap_or("false".to_string()).parse().unwrap_or(false);
+        let signature_poll_interval = env::var("SIGNATURE_POLL_INTERVAL").unwrap_or("0.1".to_string()).parse().unwrap_or(0.1);
+
+        let buy_amount_sol = env::var("BUY_AMOUNT_SOL").unwrap_or("0.01".to_string()).parse().unwrap_or(0.01);
+        let mirror_buy_mode = env::var("MIRROR_BUY_MODE").unwrap_or("false".to_string()).parse().unwrap_or(false);
+        let mirror_min_sol = env::var("MIRROR_MIN_SOL").unwrap_or("0.001".to_string()).parse().unwrap_or(0.001);
+        let mirror_max_sol = env::var("MIRROR_MAX_SOL").unwrap_or("1.0".to_string()).parse().unwrap_or(1.0);
+        let auto_trade_enabled = env::var("AUTO_TRADE_ENABLED").unwrap_or("true".to_string()).parse().unwrap_or(true);
+        let confirm_commitment = env::var("CONFIRM_COMMITMENT").unwrap_or("confirmed".to_string());
+        
+        let slippage_bps = 50; // Default or add to env if needed (not in provided list)
+        let cooldown_seconds = 60; // Default
+
+        Ok(Self {
+            log_level: "info".to_string(),
+            wallet_address,
+            private_key,
+            transport_mode: TransportMode::Auto,
+            ws_url,
+            grpc_endpoint: None,
+            rpc_endpoints: collected_rpcs,
+            jupiter_quote_url,
+            jupiter_swap_url,
+            // jupiter_api_url removed, ensure no other file uses it (already updated engine.rs)
+            jupiter_timeout,
+            jup_priority_level,
+            jup_priority_max_lamports,
+            max_workers,
+            fast_mode,
+            http_rate_limit_max,
+            signature_poll_enabled,
+            signature_poll_interval,
+            buy_amount_sol,
+            mirror_buy_mode,
+            min_trade_amount_sol: mirror_min_sol, // Mapping for compatibility
+            max_trade_amount_sol: mirror_max_sol, // Mapping for compatibility
+            mirror_min_sol,
+            mirror_max_sol,
+            slippage_bps,
+            cooldown_seconds,
+            auto_trade_enabled,
+            confirm_commitment,
+        })
     }
 }

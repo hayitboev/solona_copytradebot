@@ -46,8 +46,12 @@ impl TradingEngine {
         let signer = Arc::new(TransactionSigner::new(&config.private_key)?);
 
         let jupiter_client = Arc::new(JupiterClient::new(
-            config.jupiter_api_url.clone(),
+            config.jupiter_quote_url.clone(),
+            config.jupiter_swap_url.clone(),
             config.slippage_bps,
+            config.jup_priority_level.clone(),
+            config.jup_priority_max_lamports,
+            config.jupiter_timeout,
         )?);
 
         // Reuse one of the RPC endpoints for the RpcClient
@@ -159,16 +163,29 @@ impl EngineContext {
 
                 // Refined Strategy: Dynamic sizing based on detected amount, clamped by config.
                 let detected_amount = event.amount_in;
-                let amount = calculate_buy_amount(
-                    detected_amount,
-                    self.config.min_trade_amount_sol,
-                    self.config.max_trade_amount_sol
-                );
 
-                info!("Copying Buy: Detected {:.4} SOL, Trade Amount {:.4} SOL",
-                    detected_amount,
-                    amount as f64 / LAMPORTS_PER_SOL as f64
-                );
+                let amount = if self.config.mirror_buy_mode {
+                    // Mirror Mode: Clamp detected amount between min and max
+                    calculate_buy_amount(
+                        detected_amount,
+                        self.config.mirror_min_sol,
+                        self.config.mirror_max_sol
+                    )
+                } else {
+                    // Fixed Mode: Use configured fixed buy amount
+                    (self.config.buy_amount_sol * LAMPORTS_PER_SOL as f64) as u64
+                };
+
+                if self.config.mirror_buy_mode {
+                    info!("Copying Buy (Mirror): Detected {:.4} SOL, Trade Amount {:.4} SOL",
+                        detected_amount,
+                        amount as f64 / LAMPORTS_PER_SOL as f64
+                    );
+                } else {
+                    info!("Copying Buy (Fixed): Trade Amount {:.4} SOL",
+                        amount as f64 / LAMPORTS_PER_SOL as f64
+                    );
+                }
 
                 (SOL_MINT.to_string(), event.mint.clone(), amount)
             },
