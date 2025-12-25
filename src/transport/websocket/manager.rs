@@ -43,7 +43,7 @@ impl WebSocketManager {
 
     async fn handle_connection(&self, target_wallet: Option<String>) -> Result<()> {
         let url = Url::parse(&self.url)
-            .map_err(|e| AppError::Config(config::ConfigError::Message(e.to_string())))?;
+            .map_err(|e| AppError::Init(format!("Invalid WebSocket URL: {}", e)))?;
 
         info!("Connecting to WebSocket: {}", url);
         let (ws_stream, _) = connect_async(url).await?;

@@ -1,6 +1,5 @@
 use dashmap::DashMap;
 use std::time::{Instant, Duration};
-use tracing::warn;
 use crate::error::{Result, AppError};
 
 #[derive(Debug, Clone)]

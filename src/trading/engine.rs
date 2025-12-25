@@ -56,7 +56,7 @@ impl TradingEngine {
 
         // Reuse one of the RPC endpoints for the RpcClient
         let rpc_url = config.rpc_endpoints.first()
-            .ok_or_else(|| crate::error::AppError::Config(config::ConfigError::Message("No RPC endpoints".into())))?
+            .ok_or_else(|| crate::error::AppError::Init("No RPC endpoints".into()))?
             .clone();
         let rpc_client = Arc::new(RpcClient::new(rpc_url));
 
