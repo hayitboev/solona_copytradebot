@@ -2,9 +2,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AppError {
-    #[error("Configuration error: {0}")]
-    Config(#[from] config::ConfigError),
-
     #[error("Environment variable error: {0}")]
     Env(#[from] std::env::VarError),
 

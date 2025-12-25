@@ -1,6 +1,6 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error};
+use tracing::debug;
 use crate::error::{Result, AppError};
 use std::time::Duration;
 

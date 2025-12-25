@@ -1,11 +1,9 @@
-use std::sync::Arc;
 use std::time::Duration;
 use futures_util::future::select_ok;
 use futures_util::FutureExt;
 use reqwest::Client;
 use serde_json::Value;
-use tracing::{debug, warn, error};
-use std::pin::Pin;
+use tracing::{warn, error};
 use std::future::Future;
 
 use crate::error::{AppError, Result};
@@ -22,7 +20,7 @@ pub struct RaceClient {
 impl RaceClient {
     pub fn new(rpc_endpoints: Vec<String>) -> Result<Self> {
         if rpc_endpoints.is_empty() {
-            return Err(AppError::Config(config::ConfigError::Message("No RPC endpoints provided".into())));
+            return Err(AppError::Init("No RPC endpoints provided".into()));
         }
 
         let client = create_http_client()?;
@@ -85,7 +83,7 @@ impl RaceClient {
 
     /// Generic RPC JSON-RPC 2.0 Call
     pub async fn rpc_call(&self, method: &str, params: Value) -> Result<Value> {
-        let params_str = params.to_string(); // serialization for potential debug
+        let _params_str = params.to_string(); // serialization for potential debug
         let method = method.to_string();
 
         let _permit = self.limiter.acquire().await;

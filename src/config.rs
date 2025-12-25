@@ -1,8 +1,6 @@
 use serde::Deserialize;
-use crate::error::{Result, AppError};
+use crate::error::Result;
 use std::env;
-use std::sync::Arc;
-use config::{Config as ConfigLoader, File, Environment};
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]

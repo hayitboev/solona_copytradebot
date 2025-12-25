@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use tokio::sync::mpsc;
-use crate::error::{Result, AppError};
+use crate::error::Result;
 use crate::transport::Transport;
 use tracing::{info, error};
 
 // Placeholder for generated proto types
 // In a real project, these come from `tonic::include_proto!("geyser")`
+#[allow(dead_code)]
 mod proto {
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct SubscribeRequest {
@@ -20,7 +21,7 @@ mod proto {
 
 pub struct GrpcManager {
     endpoint: String,
-    signature_tx: mpsc::UnboundedSender<String>,
+    _signature_tx: mpsc::UnboundedSender<String>,
     // In a real impl, we'd hold the tonic client here
 }
 
@@ -28,11 +29,11 @@ impl GrpcManager {
     pub fn new(endpoint: String, signature_tx: mpsc::UnboundedSender<String>) -> Self {
         Self {
             endpoint,
-            signature_tx,
+            _signature_tx: signature_tx,
         }
     }
 
-    pub async fn run(&self, wallet_filter: String) -> Result<()> {
+    pub async fn run(&self, _wallet_filter: String) -> Result<()> {
         info!("Starting gRPC stream to {}", self.endpoint);
         
         // Pseudo-code for gRPC connection (requires valid generated proto code to compile)
