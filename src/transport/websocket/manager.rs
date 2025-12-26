@@ -28,16 +28,18 @@ pub struct WebSocketManager {
     // Let's stick to tokio Mutex for subscription as it might be held across awaits?
     // No, string cloning is fast. Let's use std Mutex for simplicity and consistency unless await is needed while holding lock.
     current_subscription: Arc<Mutex<Option<String>>>,
+    max_retries: u32,
 }
 
 impl WebSocketManager {
-    pub fn new(url: String) -> Self {
+    pub fn new(url: String, max_retries: u32) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
             url,
             signature_tx: tx,
             signature_rx: Arc::new(Mutex::new(Some(rx))),
             current_subscription: Arc::new(Mutex::new(None)),
+            max_retries,
         }
     }
 
@@ -135,6 +137,8 @@ impl WebSocketManager {
 
     /// Run the connection loop forever.
     pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
+        let mut retry_count = 0;
+
         loop {
             let target = {
                 let lock = self.current_subscription.lock().unwrap();
@@ -145,8 +149,24 @@ impl WebSocketManager {
             tokio::select! {
                 result = self.handle_connection(target) => {
                     if let Err(e) = result {
-                        error!("WebSocket connection failed: {}. Retrying in {}s...", e, RECONNECT_DELAY.as_secs());
+                        retry_count += 1;
+                        error!("WebSocket connection failed (Attempt {}/{}): {}", retry_count, self.max_retries, e);
+                        if retry_count >= self.max_retries {
+                            return Err(AppError::Transport(format!("Max retries reached: {}", e)));
+                        }
+                        info!("Retrying in {}s...", RECONNECT_DELAY.as_secs());
                     } else {
+                        // Connection success but dropped later
+                        retry_count = 0; // Reset on successful connection established (implied if we return Ok from handle_connection, but wait handle_connection returns Ok on disconnect too?)
+                        // Currently handle_connection returns Ok(()) when loop breaks (disconnect).
+                        // If it connected successfully at all, we should arguably reset counter.
+                        // But here, if it drops immediately, maybe we shouldn't?
+                        // Let's reset counter only if connection lasted some time?
+                        // For simplicity, let's treat "Ok" return as "Connection was established but lost".
+                        // So we reset retry_count IF we want to allow infinite reconnections for intermittent drops.
+                        // BUT, if it's dropping constantly, maybe we want to eventually give up?
+                        // Let's assume we reset retry_count.
+                        retry_count = 0;
                         warn!("WebSocket connection dropped. Retrying in {}s...", RECONNECT_DELAY.as_secs());
                     }
                 }
