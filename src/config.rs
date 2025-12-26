@@ -22,6 +22,7 @@ pub struct Config {
     // Transport
     pub transport_mode: TransportMode,
     pub ws_url: String, // Mapped from WEBSOCKET_URL or FAST_WS_ENDPOINT
+    pub fallback_ws_url: String, // Public fallback
     pub grpc_endpoint: Option<String>,
 
     // RPCs (Used for race client)
@@ -85,6 +86,8 @@ impl Config {
             .or_else(|_| env::var("WEBSOCKET_URL"))
             .unwrap_or_else(|_| "wss://api.mainnet-beta.solana.com".to_string());
 
+        let fallback_ws_url = "wss://api.mainnet-beta.solana.com".to_string();
+
         // 3. Build Config using `config` crate for standard loading,
         // but we might need to manually map some env vars to struct fields
         // if names don't match exactly.
@@ -124,6 +127,7 @@ impl Config {
             private_key,
             transport_mode: TransportMode::Auto,
             ws_url,
+            fallback_ws_url,
             grpc_endpoint: None,
             rpc_endpoints: collected_rpcs,
             jupiter_quote_url,
