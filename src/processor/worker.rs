@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc::{UnboundedReceiver, Sender}, broadcast, Semaphore};
 use tracing::{info, debug, error, warn};
+use std::time::SystemTime;
 
 use crate::http::race_client::RaceClient;
 use crate::processor::transaction::parse_transaction;
@@ -114,10 +115,11 @@ async fn process_signature(
         return Ok(());
     }
 
-    let start_time = now_instant();
+    let ws_arrival = now_instant();
     debug!("Processing signature: {}", signature);
 
     // 2. Fetch Transaction with Retry (to handle race where signature appears before index)
+    let fetch_start = now_instant();
     let mut tx_value = serde_json::Value::Null;
     let mut attempts = 0;
     const MAX_RETRIES: u32 = 10;
@@ -146,21 +148,58 @@ async fn process_signature(
     if tx_value.is_null() {
         return Err(crate::error::AppError::Parse(format!("Transaction {} not found after {} retries", signature, MAX_RETRIES)));
     }
+    let fetch_end = now_instant();
 
     // 3. Parse Transaction
     let parsed_tx = parse_transaction(&signature, &tx_value)?;
 
     // 4. Detect Swap
     if let Some(swap) = detect_swap(&parsed_tx, &target_wallet)? {
+        let process_end = now_instant();
         stats.inc_swaps_detected();
-        info!("Swap detected: {} {} {} for {} SOL (Price: {})",
-             if matches!(swap.direction, crate::processor::swap_detector::SwapDirection::Buy) { "Bought" } else { "Sold" },
-             swap.amount_out, // Amount of token/SOL depending on direction
-             swap.mint,
-             swap.amount_in, // This logic in formatting might be confusing, let's just log struct
-             swap.price
-        );
-        info!("Swap details: {:?}", swap);
+
+        // Calculate Timing
+        let fetch_latency_ms = (fetch_end - fetch_start).as_millis();
+        let processing_latency_ms = (process_end - fetch_end).as_millis();
+        let total_pipeline_ms = (process_end - ws_arrival).as_millis();
+
+        // Calculate Real World Lag
+        let block_time = tx_value.get("blockTime").and_then(|v| v.as_i64()).unwrap_or(0);
+        let real_lag_msg = if block_time > 0 {
+            let now_unix = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let lag = now_unix as i64 - block_time;
+            format!("{}s", lag)
+        } else {
+            "Unknown".to_string()
+        };
+
+        // Log Structured Report
+        match swap.direction {
+            crate::processor::swap_detector::SwapDirection::Buy => {
+                info!(
+                    "\n💰 [BUY DETECTED]\n   Target: {}\n   Amount: {} tokens\n   Cost:   {:.4} SOL\n   ------------------------------------------------\n   ⏱️ TIMING REPORT:\n   RPC Fetch:    {}ms\n   Processing:   {}ms\n   Total Lag:    {}ms (From WS signal)\n   Block Lag:    {} (Real-World)\n",
+                    swap.mint,
+                    swap.amount_out,
+                    swap.amount_in,
+                    fetch_latency_ms,
+                    processing_latency_ms,
+                    total_pipeline_ms,
+                    real_lag_msg
+                );
+            },
+            crate::processor::swap_detector::SwapDirection::Sell => {
+                info!(
+                    "\n💸 [SELL DETECTED]\n   Source: {}\n   Sold:   {} tokens\n   Received: {:.4} SOL (Gross Value)\n   ------------------------------------------------\n   ⏱️ TIMING REPORT:\n   RPC Fetch:    {}ms\n   Processing:   {}ms\n   Total Lag:    {}ms\n   Block Lag:    {}\n",
+                    swap.mint,
+                    swap.amount_in,
+                    swap.amount_out,
+                    fetch_latency_ms,
+                    processing_latency_ms,
+                    total_pipeline_ms,
+                    real_lag_msg
+                );
+            }
+        }
 
         // 5. Send to output
         if let Err(e) = tx_swaps.send(swap).await {
@@ -170,7 +209,7 @@ async fn process_signature(
         debug!("No swap detected for {}", signature);
     }
 
-    stats.update_processing_latency(elapsed_ms(start_time));
+    stats.update_processing_latency(elapsed_ms(ws_arrival));
 
     Ok(())
 }
