@@ -117,9 +117,35 @@ async fn process_signature(
     let start_time = now_instant();
     debug!("Processing signature: {}", signature);
 
-    // 2. Fetch Transaction
-    // Phase 1 RaceClient::get_transaction returns serde_json::Value
-    let tx_value = client.get_transaction(&signature).await?;
+    // 2. Fetch Transaction with Retry (to handle race where signature appears before index)
+    let mut tx_value = serde_json::Value::Null;
+    let mut attempts = 0;
+    const MAX_RETRIES: u32 = 10;
+
+    while attempts < MAX_RETRIES {
+        match client.get_transaction(&signature).await {
+            Ok(val) => {
+                // If val is null, it means RPC returned success but no data (transaction not found yet)
+                if !val.is_null() {
+                    tx_value = val;
+                    break;
+                }
+                debug!("Transaction {} not found yet (attempt {}/{})", signature, attempts + 1, MAX_RETRIES);
+            }
+            Err(e) => {
+                debug!("Failed to fetch transaction {} (attempt {}/{}): {}", signature, attempts + 1, MAX_RETRIES, e);
+            }
+        }
+
+        attempts += 1;
+        if attempts < MAX_RETRIES {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+
+    if tx_value.is_null() {
+        return Err(crate::error::AppError::Parse(format!("Transaction {} not found after {} retries", signature, MAX_RETRIES)));
+    }
 
     // 3. Parse Transaction
     let parsed_tx = parse_transaction(&signature, &tx_value)?;
