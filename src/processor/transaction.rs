@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use crate::error::{AppError, Result};

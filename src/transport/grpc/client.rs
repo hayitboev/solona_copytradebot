@@ -21,12 +21,12 @@ mod proto {
 
 pub struct GrpcManager {
     endpoint: String,
-    _signature_tx: mpsc::UnboundedSender<String>,
+    _signature_tx: mpsc::UnboundedSender<(String, std::time::Instant, i64)>,
     // In a real impl, we'd hold the tonic client here
 }
 
 impl GrpcManager {
-    pub fn new(endpoint: String, signature_tx: mpsc::UnboundedSender<String>) -> Self {
+    pub fn new(endpoint: String, signature_tx: mpsc::UnboundedSender<(String, std::time::Instant, i64)>) -> Self {
         Self {
             endpoint,
             _signature_tx: signature_tx,
@@ -75,7 +75,7 @@ impl Transport for GrpcManager {
         Ok(())
     }
 
-    fn get_signature_receiver(&self) -> mpsc::UnboundedReceiver<String> {
+    fn get_signature_receiver(&self) -> mpsc::UnboundedReceiver<(String, std::time::Instant, i64)> {
         // Should return a new receiver or handle differently.
         // For simplicity in this scaffold, we panic if not set up correctly externally.
         let (_tx, rx) = mpsc::unbounded_channel();

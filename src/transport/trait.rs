@@ -12,7 +12,7 @@ pub trait Transport: Send + Sync {
 
     /// Get the channel receiver for transaction signatures
     /// Returns a broadcast or mpsc receiver
-    fn get_signature_receiver(&self) -> mpsc::UnboundedReceiver<String>;
+    fn get_signature_receiver(&self) -> mpsc::UnboundedReceiver<(String, std::time::Instant, i64)>;
 
     /// Force a reconnection logic
     async fn reconnect(&self) -> Result<()>;
