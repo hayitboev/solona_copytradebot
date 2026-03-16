@@ -18,10 +18,10 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 pub struct WebSocketManager {
     url: String,
     // Channel to send detected signatures to the processor
-    signature_tx: mpsc::UnboundedSender<String>,
+    signature_tx: mpsc::UnboundedSender<(String, std::time::Instant, i64)>,
     // We keep the receiver in an Option inside a Mutex to hand it out once
     // Using std::sync::Mutex to allow synchronous get_signature_receiver
-    signature_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
+    signature_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<(String, std::time::Instant, i64)>>>>,
     // Track current subscription to resubscribe on reconnect
     // Using tokio::sync::Mutex here is fine as it's accessed in async tasks,
     // but std::sync::Mutex is also fine if contention is low.
@@ -83,7 +83,11 @@ impl WebSocketManager {
                     match msg {
                         Some(Ok(message)) => {
                             match message {
-                                Message::Text(text) => self.process_message(&text).await,
+                                Message::Text(text) => {
+                                    let ws_arrival = std::time::Instant::now();
+                                    let ws_arrival_utc = chrono::Utc::now().timestamp_millis();
+                                    self.process_message(&text, ws_arrival, ws_arrival_utc).await
+                                },
                                 Message::Binary(_) => {},
                                 Message::Ping(_) => {},
                                 Message::Pong(_) => {},
@@ -110,7 +114,7 @@ impl WebSocketManager {
         Ok(())
     }
 
-    async fn process_message(&self, text: &str) {
+    async fn process_message(&self, text: &str, ws_arrival: std::time::Instant, ws_arrival_utc: i64) {
         if !text.contains("logsNotification") {
             return;
         }
@@ -121,7 +125,7 @@ impl WebSocketManager {
                     if let Some(result) = params.get("result") {
                         if let Some(value) = result.get("value") {
                             if let Some(sig) = value.get("signature").and_then(|s| s.as_str()) {
-                                if let Err(e) = self.signature_tx.send(sig.to_string()) {
+                                if let Err(e) = self.signature_tx.send((sig.to_string(), ws_arrival, ws_arrival_utc)) {
                                     error!("Failed to send signature to channel: {}", e);
                                 } else {
                                     debug!("Received signature: {}", sig);
@@ -166,7 +170,8 @@ impl WebSocketManager {
                         // So we reset retry_count IF we want to allow infinite reconnections for intermittent drops.
                         // BUT, if it's dropping constantly, maybe we want to eventually give up?
                         // Let's assume we reset retry_count.
-                        retry_count = 0;
+                        retry_count = 0; // Reset
+                        let _ = retry_count; // clear unused assignment warning
                         warn!("WebSocket connection dropped. Retrying in {}s...", RECONNECT_DELAY.as_secs());
                     }
                 }
@@ -203,7 +208,7 @@ impl Transport for WebSocketManager {
         Ok(())
     }
 
-    fn get_signature_receiver(&self) -> mpsc::UnboundedReceiver<String> {
+    fn get_signature_receiver(&self) -> mpsc::UnboundedReceiver<(String, std::time::Instant, i64)> {
         self.signature_rx.lock().unwrap().take().expect("Receiver already taken")
     }
 

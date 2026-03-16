@@ -16,6 +16,9 @@ pub struct SwapEvent {
     pub amount_in: f64,
     pub amount_out: f64,
     pub price: f64, // Price in SOL (SOL/Token or Token/SOL depending on convention, typically SOL per Token)
+    pub ws_arrival: std::time::Instant,
+    pub network_latency_ms: i64,
+    pub internal_processing_us: u128,
 }
 
 pub fn detect_swap(tx: &ParsedTransaction, target_wallet: &str) -> Result<Option<SwapEvent>> {
@@ -70,6 +73,9 @@ pub fn detect_swap(tx: &ParsedTransaction, target_wallet: &str) -> Result<Option
                     amount_in: sol_spent,
                     amount_out: token_received,
                     price,
+                    ws_arrival: std::time::Instant::now(),
+                    network_latency_ms: 0,
+                    internal_processing_us: 0,
                 }));
             }
             // Check for Sell: SOL increases, Token decreases
@@ -91,6 +97,9 @@ pub fn detect_swap(tx: &ParsedTransaction, target_wallet: &str) -> Result<Option
                     amount_in: token_sold,
                     amount_out: sol_received,
                     price,
+                    ws_arrival: std::time::Instant::now(),
+                    network_latency_ms: 0,
+                    internal_processing_us: 0,
                 }));
             }
         }

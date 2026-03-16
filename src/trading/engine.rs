@@ -233,19 +233,25 @@ impl EngineContext {
 
         info!("Executing BUY for {} (Approx Value: {} SOL)", output_mint, amount_sol_risk);
 
+        let total_time_ms = event.ws_arrival.elapsed().as_millis();
+        println!("\n[TRADE DETECTED] Signature: {}", event.signature);
+        println!("[TIME] Blockchain -> Bot: {} ms", event.network_latency_ms);
+        println!("[TIME] Internal Processing: {} µs", event.internal_processing_us);
+        println!("[TOTAL] Ready to copy in: {} ms\n", total_time_ms);
+
         // 3. Fetch Quote
-        let quote = self.jupiter_client.get_quote(&input_mint, &output_mint, amount_in_lamports).await?;
+        // let quote = self.jupiter_client.get_quote(&input_mint, &output_mint, amount_in_lamports).await?;
 
         // 4. Get Swap Transaction
-        let swap_response = self.jupiter_client.get_swap_tx(quote, &self.signer.pubkey()).await?;
+        // let swap_response = self.jupiter_client.get_swap_tx(quote, &self.signer.pubkey()).await?;
 
         // 5. Sign Transaction
-        let signed_tx = self.signer.sign_transaction(&swap_response.swap_transaction)?;
+        // let signed_tx = self.signer.sign_transaction(&swap_response.swap_transaction)?;
 
         // 6. Broadcast
-        let signature = self.race_client.send_transaction_with_retry(&signed_tx, 3).await?;
+        // let signature = self.race_client.send_transaction_with_retry(&signed_tx, 3).await?;
 
-        info!("Trade submitted! Signature: {}", signature);
+        // info!("Trade submitted! Signature: {}", signature);
 
         // Record trade in risk manager (cooldown)
         // Always record the Token Mint involved (Buy: output, Sell: input/event.mint)
